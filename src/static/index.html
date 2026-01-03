@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vela File Browser</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #f5f5f5;
+            color: #202124;
+        }
+
+        .header {
+            background: white;
+            border-bottom: 1px solid #e0e0e0;
+            padding: 16px 24px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+
+        .header h1 {
+            font-size: 22px;
+            font-weight: 400;
+            color: #5f6368;
+        }
+
+        .breadcrumb {
+            padding: 16px 24px;
+            background: white;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        .breadcrumb-item {
+            color: #1a73e8;
+            cursor: pointer;
+            text-decoration: none;
+        }
+
+        .breadcrumb-item:hover {
+            text-decoration: underline;
+        }
+
+        .breadcrumb-separator {
+            color: #5f6368;
+        }
+
+        .breadcrumb-current {
+            color: #202124;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .file-list {
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 12px 24px;
+            border-bottom: 1px solid #e0e0e0;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .file-item:last-child {
+            border-bottom: none;
+        }
+
+        .file-item:hover {
+            background: #f8f9fa;
+        }
+
+        .file-icon {
+            width: 24px;
+            height: 24px;
+            margin-right: 16px;
+            fill: #5f6368;
+        }
+
+        .folder-icon {
+            fill: #1a73e8;
+        }
+
+        .image-icon {
+            fill: #34a853;
+        }
+
+        .video-icon {
+            fill: #ea4335;
+        }
+
+        .file-name {
+            flex: 1;
+            font-size: 14px;
+            color: #202124;
+        }
+
+        .file-size {
+            font-size: 12px;
+            color: #5f6368;
+            margin-left: 16px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 64px 24px;
+            color: #5f6368;
+        }
+
+        .empty-state-icon {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 16px;
+            opacity: 0.5;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 48px;
+            color: #5f6368;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #1a73e8;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Modal styles */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            max-width: 90vw;
+            max-height: 90vh;
+            position: relative;
+        }
+
+        .modal-content img,
+        .modal-content video {
+            max-width: 100%;
+            max-height: 90vh;
+            object-fit: contain;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: -40px;
+            right: 0;
+            color: white;
+            font-size: 32px;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 0;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-close:hover {
+            color: #ccc;
+        }
+
+        .modal-filename {
+            position: absolute;
+            bottom: -40px;
+            left: 0;
+            right: 0;
+            color: white;
+            text-align: center;
+            font-size: 14px;
+        }
+
+        .modal-download {
+            position: absolute;
+            top: -40px;
+            left: 0;
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+            background: none;
+            border: none;
+            padding: 8px 16px;
+            text-decoration: underline;
+        }
+
+        .modal-download:hover {
+            color: #ccc;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📁 Vela File Browser</h1>
+    </div>
+
+    <div class="breadcrumb" id="breadcrumb"></div>
+
+    <div class="container">
+        <div id="content">
+            <div class="loading">
+                <div class="spinner"></div>
+                <div>Loading files...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal for images and videos -->
+    <div class="modal" id="modal">
+        <div class="modal-content">
+            <button class="modal-download" id="modalDownload">Download</button>
+            <button class="modal-close" onclick="closeModal()">×</button>
+            <div id="modalMedia"></div>
+            <div class="modal-filename" id="modalFilename"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentPath = '';
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        function getFileType(filename) {
+            const ext = filename.split('.').pop().toLowerCase();
+            const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'];
+            const videoExts = ['mp4', 'webm', 'mov', 'avi', 'mkv'];
+            
+            if (imageExts.includes(ext)) return 'image';
+            if (videoExts.includes(ext)) return 'video';
+            return 'file';
+        }
+
+        async function loadFiles(path = '') {
+            const content = document.getElementById('content');
+            content.innerHTML = `
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <div>Loading files...</div>
+                </div>
+            `;
+
+            try {
+                const response = await fetch(`/api/list?path=${encodeURIComponent(path)}`);
+                const files = await response.json();
+                
+                currentPath = path;
+                updateBreadcrumb();
+                renderFiles(files);
+            } catch (error) {
+                console.error('Error loading files:', error);
+                content.innerHTML = `
+                    <div class="empty-state">
+                        <div style="font-size: 48px; margin-bottom: 16px;">⚠️</div>
+                        <div>Error loading files</div>
+                    </div>
+                `;
+            }
+        }
+
+        function updateBreadcrumb() {
+            const breadcrumb = document.getElementById('breadcrumb');
+            const parts = currentPath.split('/').filter(p => p);
+            
+            let html = '<a class="breadcrumb-item" onclick="loadFiles(\'\')">Home</a>';
+            
+            if (parts.length > 0) {
+                html += '<span class="breadcrumb-separator">/</span>';
+            }
+            
+            parts.forEach((part, index) => {
+                const isLast = index === parts.length - 1;
+                const pathTo = parts.slice(0, index + 1).join('/');
+                
+                if (isLast) {
+                    html += `<span class="breadcrumb-current">${part}</span>`;
+                } else {
+                    html += `<a class="breadcrumb-item" onclick="loadFiles('${pathTo}')">${part}</a>`;
+                    html += '<span class="breadcrumb-separator">/</span>';
+                }
+            });
+            
+            breadcrumb.innerHTML = html;
+        }
+
+        function renderFiles(files) {
+            const content = document.getElementById('content');
+            
+            if (files.length === 0) {
+                content.innerHTML = `
+                    <div class="empty-state">
+                        <svg class="empty-state-icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
+                        </svg>
+                        <div>This folder is empty</div>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = '<div class="file-list">';
+            
+            files.forEach(file => {
+                const fileType = getFileType(file.name);
+                let icon, iconClass = '';
+                
+                if (file.is_dir) {
+                    icon = '<svg class="file-icon folder-icon" viewBox="0 0 24 24"><path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>';
+                } else if (fileType === 'image') {
+                    icon = '<svg class="file-icon image-icon" viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>';
+                } else if (fileType === 'video') {
+                    icon = '<svg class="file-icon video-icon" viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>';
+                } else {
+                    icon = '<svg class="file-icon" viewBox="0 0 24 24"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>';
+                }
+                
+                if (file.is_dir) {
+                    html += `
+                        <div class="file-item" onclick="loadFiles('${file.path}')">
+                            ${icon}
+                            <div class="file-name">${file.name}</div>
+                        </div>
+                    `;
+                } else {
+                    const onclick = (fileType === 'image' || fileType === 'video') 
+                        ? `openModal('${file.path}', '${file.name}', '${fileType}')`
+                        : `downloadFile('${file.path}', '${file.name}')`;
+                    
+                    html += `
+                        <div class="file-item" onclick="${onclick}">
+                            ${icon}
+                            <div class="file-name">${file.name}</div>
+                            <div class="file-size">${formatFileSize(file.size)}</div>
+                        </div>
+                    `;
+                }
+            });
+            
+            html += '</div>';
+            content.innerHTML = html;
+        }
+
+        function openModal(path, filename, type) {
+            const modal = document.getElementById('modal');
+            const modalMedia = document.getElementById('modalMedia');
+            const modalFilename = document.getElementById('modalFilename');
+            const modalDownload = document.getElementById('modalDownload');
+            
+            const fileUrl = `/files/${path}`;
+            
+            if (type === 'image') {
+                modalMedia.innerHTML = `<img src="${fileUrl}" alt="${filename}">`;
+            } else if (type === 'video') {
+                modalMedia.innerHTML = `<video controls autoplay><source src="${fileUrl}"></video>`;
+            }
+            
+            modalFilename.textContent = filename;
+            modalDownload.onclick = () => downloadFile(path, filename);
+            
+            modal.classList.add('active');
+        }
+
+        function closeModal() {
+            const modal = document.getElementById('modal');
+            const modalMedia = document.getElementById('modalMedia');
+            modal.classList.remove('active');
+            modalMedia.innerHTML = '';
+        }
+
+        function downloadFile(path, filename) {
+            const a = document.createElement('a');
+            a.href = `/files/${path}`;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        // Close modal on ESC key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeModal();
+            }
+        });
+
+        // Close modal on background click
+        document.getElementById('modal').addEventListener('click', (e) => {
+            if (e.target.id === 'modal') {
+                closeModal();
+            }
+        });
+
+        // Load initial files
+        loadFiles();
+    </script>
+</body>
+</html>
