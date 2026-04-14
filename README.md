@@ -6,7 +6,7 @@
 
 ### Overview
 
-Vela is a Rust CLI tool that lets you scan, mount, select, and serve any external storage device over your local network. Turn your USBs, SSDs, or other storage devices into a personal local cloud quickly.
+Vela is a Rust CLI tool that lets you scan, mount, and serve any external storage device over your local network. Turn your USBs, SSDs, or other storage devices into a personal local cloud quickly.
 
 ---
 
@@ -19,35 +19,35 @@ git clone https://github.com/<your-username>/vela.git
 cd vela
 ```
 
-Build the project:
+Build and install locally (as `tvela`):
 
 ```bash
-cargo build --release
+make install
 ```
 
-Run the project:
-
-```bash
-cargo run -- <command>
-```
+This installs the binary as `tvela` in `~/.local/bin/`. Ensure this directory is in your `PATH`.
 
 ---
 
 ### CLI Commands
 
+All commands can be run using the `tvela` binary after installation.
+
 #### 1. Scan
 
-List all storage devices connected to your system:
+List all storage devices connected to your system in a tree-like structure:
 
 ```bash
-cargo run -- scan
+tvela scan
 ```
 
 Output example:
 
 ```
-/dev/sda1           EXTSSD      1234-ABCD
-/dev/sdb1           USBDRIVE    5678-EFGH
+NAME               LABEL      SIZE       TYPE  MNT NAME     MOUNT           REM   PERM
+------------------ ---------- ---------- ----- ------------ --------------- ----- --------
+/dev/sda           -          7.46GiB    disk  -            -               Yes   RW
+└─sda1             FIREFLY    7.46GiB    part  temp         /mnt/temp       -     RW
 ```
 
 ---
@@ -57,16 +57,16 @@ Output example:
 Mount a device at `/mnt/<mount_name>` (creates the folder if missing):
 
 ```bash
-cargo run -- mount <device> [mount_name]
+tvela mount <device> <mount_name>
 ```
 
 * `device`: Path to the storage device (e.g., `/dev/sda1`)
-* `mount_name`: Optional; folder name under `/mnt`. If omitted, the device name is used.
+* `mount_name`: Folder name under `/mnt/`.
 
 Example:
 
 ```bash
-cargo run -- mount /dev/sda1 ext
+tvela mount /dev/sda1 ext
 ```
 
 Mounted at `/mnt/ext`.
@@ -78,46 +78,35 @@ Mounted at `/mnt/ext`.
 Unmount a previously mounted device:
 
 ```bash
-cargo run -- unmount <mountpoint>
+tvela unmount <mountpoint>
 ```
 
 Example:
 
 ```bash
-cargo run -- unmount /mnt/ext
+tvela unmount /mnt/ext
 ```
 
 ---
 
-#### 4. Select
+#### 4. Serve
 
-Select a mounted path to serve over the network:
+Start an HTTP server serving a specific mount from `/mnt/` on the local network:
 
 ```bash
-cargo run -- select <mount_path>
+tvela serve <mount_name>
 ```
 
 Example:
 
 ```bash
-cargo run -- select /mnt/ext
+tvela serve ext
 ```
 
-This saves the selection for the `serve` command.
-
----
-
-#### 5. Serve
-
-Start an HTTP server serving the selected storage path on the local network:
-
-```bash
-cargo run -- serve
-```
+This will serve files from `/mnt/ext`.
 
 Default server URL:
 
 ```
 http://localhost:9000
 ```
-

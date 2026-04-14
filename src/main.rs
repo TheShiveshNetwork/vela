@@ -1,6 +1,5 @@
 mod cli;
 mod device;
-mod config;
 mod server;
 
 use cli::Cli;
