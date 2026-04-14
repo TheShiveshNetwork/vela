@@ -65,11 +65,11 @@ pub fn scan() -> Result<()> {
     // Sort disks for consistent output
     disks.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // Refined compact columns for better fit
-    println!("{:<18} {:<12} {:<10} {:<5} {:<18} {:<5} {}", 
-             "NAME", "LABEL", "SIZE", "TYPE", "MOUNT", "REM", "PERM");
-    println!("{:-<18} {:-<12} {:-<10} {:-<5} {:-<18} {:-<5} {:-<10}", 
-             "", "", "", "", "", "", "");
+    // Updated columns for better fit with MOUNT NAME
+    println!("{:<18} {:<10} {:<10} {:<5} {:<12} {:<15} {:<5} {}", 
+             "NAME", "LABEL", "SIZE", "TYPE", "MNT NAME", "MOUNT", "REM", "PERM");
+    println!("{:-<18} {:-<10} {:-<10} {:-<5} {:-<12} {:-<15} {:-<5} {:-<8}", 
+             "", "", "", "", "", "", "", "");
 
     for disk in disks {
         print_device(&disk, "", false, &mounts);
@@ -116,13 +116,20 @@ fn print_device(dev: &BlockDevice, prefix: &str, is_part: bool, mounts: &HashMap
         .map(|s| s.as_str())
         .unwrap_or("-");
 
+    // Extract mount name from /mnt/ paths
+    let mount_name = if mountpoint.starts_with("/mnt/") {
+        mountpoint.trim_start_matches("/mnt/").to_string()
+    } else {
+        "-".to_string()
+    };
+
     // Try to get removable and read-only status from sysfs
     let mut removable = "-";
-    let mut permissions = "RW"; // Abbreviated
+    let mut permissions = "RW";
 
     if let Ok(sysfs) = dev.sysfs() {
         if let Ok(remov_str) = fs::read_to_string(sysfs.join("removable")) {
-            removable = if remov_str.trim() == "1" { "T" } else { "F" };
+            removable = if remov_str.trim() == "1" { "Yes" } else { "No" };
         }
         if let Ok(ro_str) = fs::read_to_string(sysfs.join("ro")) {
             if ro_str.trim() == "1" {
@@ -131,19 +138,13 @@ fn print_device(dev: &BlockDevice, prefix: &str, is_part: bool, mounts: &HashMap
         }
     }
 
-    // Truncate mountpoint if too long
-    let display_mount = if mountpoint.len() > 18 {
-        format!("...{}", &mountpoint[mountpoint.len()-15..])
-    } else {
-        mountpoint.to_string()
-    };
-
-    println!("{:<18} {:<12} {:<10} {:<5} {:<18} {:<5} {}", 
+    println!("{:<18} {:<10} {:<10} {:<5} {:<12} {:<15} {:<5} {}", 
              display_name, 
-             truncate(label, 12), 
+             truncate(label, 10), 
              size, 
              dev_type, 
-             display_mount, 
+             mount_name,
+             truncate(mountpoint, 15), 
              removable, 
              permissions);
 }

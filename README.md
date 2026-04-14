@@ -6,7 +6,7 @@
 
 ### Overview
 
-Vela is a Rust CLI tool that lets you scan, mount, select, and serve any external storage device over your local network. Turn your USBs, SSDs, or other storage devices into a personal local cloud quickly.
+Vela is a Rust CLI tool that lets you scan, mount, and serve any external storage device over your local network. Turn your USBs, SSDs, or other storage devices into a personal local cloud quickly.
 
 ---
 
@@ -44,10 +44,10 @@ tvela scan
 Output example:
 
 ```
-NAME                      LABEL                UUID                                   CAPACITY
-------------------------- -------------------- -------------------------------------- ----------
-/dev/sda                  -                    -                                      7.46 GiB
-└─/dev/sda1               FIREFLY              E675-81A7                              7.46 GiB
+NAME               LABEL      SIZE       TYPE  MNT NAME     MOUNT           REM   PERM
+------------------ ---------- ---------- ----- ------------ --------------- ----- --------
+/dev/sda           -          7.46GiB    disk  -            -               Yes   RW
+└─sda1             FIREFLY    7.46GiB    part  temp         /mnt/temp       -     RW
 ```
 
 ---
@@ -61,7 +61,7 @@ tvela mount <device> <mount_name>
 ```
 
 * `device`: Path to the storage device (e.g., `/dev/sda1`)
-* `mount_name`: Folder name under `/mnt`.
+* `mount_name`: Folder name under `/mnt/`.
 
 Example:
 
@@ -89,35 +89,24 @@ tvela unmount /mnt/ext
 
 ---
 
-#### 4. Select
+#### 4. Serve
 
-Select a mounted path to serve over the network:
+Start an HTTP server serving a specific mount from `/mnt/` on the local network:
 
 ```bash
-tvela select <mount_path>
+tvela serve <mount_name>
 ```
 
 Example:
 
 ```bash
-tvela select /mnt/ext
+tvela serve ext
 ```
 
-This saves the selection for the `serve` command.
-
----
-
-#### 5. Serve
-
-Start an HTTP server serving the selected storage path on the local network:
-
-```bash
-tvela serve
-```
+This will serve files from `/mnt/ext`.
 
 Default server URL:
 
 ```
 http://localhost:9000
 ```
-
