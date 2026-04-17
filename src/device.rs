@@ -5,10 +5,14 @@ use std::process::Command;
 use std::path::Path;
 use std::collections::HashMap;
 
-pub fn mount_device(device: &str, mount_name: &str) -> Result<()> {
-    let mountpoint = format!("/mnt/{}", mount_name);
+use nix::unistd::{getuid, getgid};
 
-    println!("Mounting: {} -> {}", device, mountpoint);
+pub fn mount_device(device: &str, mount_name: &str, read_only: bool) -> Result<()> {
+    let mountpoint = format!("/mnt/{}", mount_name);
+    let uid = getuid().as_raw();
+    let gid = getgid().as_raw();
+
+    println!("Mounting ({}): {} -> {}", if read_only { "RO" } else { "RW" }, device, mountpoint);
 
     let path = Path::new(&mountpoint);
     if !path.exists() {
@@ -16,9 +20,19 @@ pub fn mount_device(device: &str, mount_name: &str) -> Result<()> {
         println!("Created mountpoint: {}", mountpoint);
     }
 
-    let status = Command::new("sudo")
-        .arg("mount")
-        .arg(device)
+    let mut cmd = Command::new("sudo");
+    cmd.arg("mount");
+    
+    let mut options = if read_only { "ro".to_string() } else { "rw".to_string() };
+    
+    // Add uid and gid to options to ensure the current user has permissions
+    // Note: Some filesystems (like ext4) ignore these options, but they are 
+    // essential for FAT, NTFS, exFAT, etc.
+    options.push_str(&format!(",uid={},gid={}", uid, gid));
+    
+    cmd.arg("-o").arg(options);
+    
+    let status = cmd.arg(device)
         .arg(&mountpoint)
         .status()?;
 

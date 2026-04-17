@@ -16,6 +16,9 @@ enum Commands {
     Mount {
         device: String,
         mount_name: String,
+        /// Mode: 'r' for read-only (default), 'w' for read-write
+        #[arg(short, long, default_value = "r")]
+        mode: String,
     },
     /// Unmount a device
     Unmount {
@@ -25,6 +28,12 @@ enum Commands {
     Serve {
         /// The name of the mount in /mnt/ (e.g., 'temp' for /mnt/temp)
         mount_name: String,
+        /// Mode: 'r' for read-only (default), 'w' for read-write
+        #[arg(short, long, default_value = "r")]
+        mode: String,
+        /// Disable authentication
+        #[arg(long, default_value_t = false)]
+        no_auth: bool,
     },
 }
 
@@ -35,17 +44,19 @@ impl Cli {
                 device::scan()?;
             }
 
-            Commands::Mount { device, mount_name } => {
-                device::mount_device(&device, &mount_name)?;
+            Commands::Mount { device, mount_name, mode } => {
+                let read_only = mode == "r";
+                device::mount_device(&device, &mount_name, read_only)?;
             }
 
             Commands::Unmount { mountpoint } => {
                 device::unmount_device(&mountpoint)?;
             }
 
-            Commands::Serve { mount_name } => {
+            Commands::Serve { mount_name, mode, no_auth } => {
                 let mount_path = format!("/mnt/{}", mount_name);
-                server::start(mount_path).await?;
+                let read_only = mode == "r";
+                server::start(mount_path, read_only, no_auth).await?;
             }
         }
         Ok(())
