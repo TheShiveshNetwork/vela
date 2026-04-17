@@ -275,10 +275,14 @@ async fn upload_file(
 
     let mut target_dir = PathBuf::from(&state.root);
     let mut filename = String::new();
-    let mut data = Vec::new();
 
-    println!("=== UPLOAD REQUEST ===");
-    while let Ok(Some(field)) = multipart.next_field().await {
+    println!("=== UPLOAD REQUEST (STREAMING) ===");
+    
+    // We first need to find the filename and target path from the multipart fields
+    // However, multipart fields are sequential. To be safe and efficient, we 
+    // stream the file field last or handle it when it appears.
+    
+    while let Ok(Some(mut field)) = multipart.next_field().await {
         let name = field.name().unwrap_or_default().to_string();
         
         if name == "path" {
@@ -286,36 +290,43 @@ async fn upload_file(
             target_dir = target_dir.join(path_val.trim_start_matches('/'));
         } else if name == "file" {
             filename = field.file_name().unwrap_or_default().to_string();
-            let bytes = field.bytes().await.unwrap_or_default();
-            data = bytes.to_vec();
-            println!("Received file '{}' with {} bytes", filename, data.len());
-        }
-    }
+            
+            if filename.is_empty() {
+                filename = format!("upload_{}.bin", uuid::Uuid::new_v4());
+            }
 
-    if data.is_empty() {
-        return (StatusCode::BAD_REQUEST, "Empty file uploaded").into_response();
+            // Safety: Path Traversal Check before creating the file
+            if !target_dir.starts_with(&state.root) {
+                println!("ERROR: Invalid path traversal blocked during stream.");
+                return (StatusCode::FORBIDDEN, "Invalid path").into_response();
+            }
+
+            let dest_path = target_dir.join(&filename);
+            println!("Streaming data to: {:?}", dest_path);
+
+            let mut file = match File::create(&dest_path).await {
+                Ok(file) => file,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create file: {}", e)).into_response(),
+            };
+
+            let mut total_bytes = 0;
+            while let Ok(Some(chunk)) = field.chunk().await {
+                if let Err(e) = file.write_all(&chunk).await {
+                    println!("ERROR writing chunk: {}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Write error during streaming").into_response();
+                }
+                total_bytes += chunk.len();
+            }
+            
+            println!("Stream complete. Received {} bytes.", total_bytes);
+        }
     }
 
     if filename.is_empty() {
-        filename = format!("upload_{}.bin", uuid::Uuid::new_v4());
+        return (StatusCode::BAD_REQUEST, "No file provided").into_response();
     }
 
-    if !target_dir.starts_with(&state.root) {
-        return (StatusCode::FORBIDDEN, "Invalid path").into_response();
-    }
-
-    let dest_path = target_dir.join(&filename);
-    
-    match File::create(&dest_path).await {
-        Ok(mut file) => {
-            if let Err(e) = file.write_all(&data).await {
-                println!("ERROR writing file: {}", e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to write file").into_response();
-            }
-            StatusCode::OK.into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create file: {}", e)).into_response(),
-    }
+    StatusCode::OK.into_response()
 }
 
 fn get_content_type(path: &PathBuf) -> String {
