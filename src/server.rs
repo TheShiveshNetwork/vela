@@ -3,12 +3,12 @@ use axum::{
     Router,
     extract::{Query, State, Path as AxumPath, Multipart},
     response::{Json, IntoResponse, Response},
-    http::{StatusCode, header},
+    http::{StatusCode, header, HeaderMap, HeaderValue},
     body::Body,
 };
 use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
 use serde::Serialize;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{net::SocketAddr, path::{PathBuf, Path, Component}, sync::Arc};
 use anyhow::Result;
 use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, AsyncReadExt, AsyncWriteExt};
@@ -151,6 +151,27 @@ async fn serve_static(AxumPath(path): AxumPath<String>) -> Response {
     }
 }
 
+fn resolve_path_within_root(root: &str, raw: &str) -> Option<PathBuf> {
+    let mut rel = PathBuf::new();
+    for component in Path::new(raw.trim_start_matches('/')).components() {
+        match component {
+            Component::Normal(part) => rel.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(PathBuf::from(root).join(rel))
+}
+
+fn sanitize_upload_filename(filename: &str) -> Option<String> {
+    let name = Path::new(filename).file_name()?.to_str()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 async fn serve_file(
     State(state): State<Arc<ServerState>>,
     cookies: Cookies,
@@ -161,12 +182,9 @@ async fn serve_file(
         return (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
     }
 
-    let clean_path = path.trim_start_matches('/');
-    let full_path = PathBuf::from(&state.root).join(clean_path);
-    
-    if !full_path.starts_with(&state.root) {
+    let Some(full_path) = resolve_path_within_root(&state.root, &path) else {
         return (StatusCode::FORBIDDEN, "Access denied").into_response();
-    }
+    };
 
     let metadata = match tokio::fs::metadata(&full_path).await {
         Ok(metadata) => {
@@ -176,7 +194,8 @@ async fn serve_file(
             metadata
         }
         Err(e) => {
-            return (StatusCode::NOT_FOUND, format!("File not found: {}", e)).into_response();
+            eprintln!("File metadata error for {:?}: {}", full_path, e);
+            return (StatusCode::NOT_FOUND, "File not found").into_response();
         }
     };
     
@@ -204,8 +223,6 @@ async fn serve_file(
     
     (StatusCode::OK, response_headers, body).into_response()
 }
-
-use axum::http::{HeaderMap, HeaderValue};
 
 async fn serve_range(
     full_path: PathBuf,
@@ -282,14 +299,25 @@ async fn upload_file(
     // However, multipart fields are sequential. To be safe and efficient, we 
     // stream the file field last or handle it when it appears.
     
-    while let Ok(Some(mut field)) = multipart.next_field().await {
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("Failed to read multipart field: {}", e);
+                return (StatusCode::BAD_REQUEST, "Invalid multipart form data").into_response();
+            }
+        };
         let name = field.name().unwrap_or_default().to_string();
         
         if name == "path" {
             let path_val = field.text().await.unwrap_or_default();
-            target_dir = target_dir.join(path_val.trim_start_matches('/'));
+            let Some(resolved_path) = resolve_path_within_root(&state.root, &path_val) else {
+                return (StatusCode::FORBIDDEN, "Invalid path").into_response();
+            };
+            target_dir = resolved_path;
         } else if name == "file" {
-            filename = field.file_name().unwrap_or_default().to_string();
+            filename = sanitize_upload_filename(field.file_name().unwrap_or_default()).unwrap_or_default();
             
             if filename.is_empty() {
                 filename = format!("upload_{}.bin", uuid::Uuid::new_v4());
@@ -306,16 +334,28 @@ async fn upload_file(
 
             let mut file = match File::create(&dest_path).await {
                 Ok(file) => file,
-                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create file: {}", e)).into_response(),
+                Err(e) => {
+                    eprintln!("Failed to create upload destination {:?}: {}", dest_path, e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create file").into_response();
+                }
             };
 
             let mut total_bytes = 0;
-            while let Ok(Some(chunk)) = field.chunk().await {
-                if let Err(e) = file.write_all(&chunk).await {
-                    println!("ERROR writing chunk: {}", e);
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "Write error during streaming").into_response();
+            loop {
+                match field.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if let Err(e) = file.write_all(&chunk).await {
+                            eprintln!("ERROR writing upload chunk: {}", e);
+                            return (StatusCode::INTERNAL_SERVER_ERROR, "Write error during streaming").into_response();
+                        }
+                        total_bytes += chunk.len();
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("ERROR reading upload chunk: {}", e);
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read upload stream").into_response();
+                    }
                 }
-                total_bytes += chunk.len();
             }
             
             println!("Stream complete. Received {} bytes.", total_bytes);
@@ -354,11 +394,9 @@ async fn list_files(
 
     let rel_path = params.get("path").cloned().unwrap_or_default();
     let rel_path = rel_path.trim_start_matches('/');
-    let full_path = PathBuf::from(&state.root).join(rel_path);
-    
-    if !full_path.starts_with(&state.root) {
+    let Some(full_path) = resolve_path_within_root(&state.root, rel_path) else {
         return (StatusCode::FORBIDDEN, "Access denied").into_response();
-    }
+    };
 
     let mut entries = Vec::new();
     if let Ok(mut read_dir) = tokio::fs::read_dir(&full_path).await {
