@@ -152,6 +152,9 @@ async fn serve_static(AxumPath(path): AxumPath<String>) -> Response {
 }
 
 fn resolve_path_within_root(root: &str, raw: &str) -> Option<PathBuf> {
+    if raw.contains('\\') {
+        return None;
+    }
     let mut rel = PathBuf::new();
     for component in Path::new(raw.trim_start_matches('/')).components() {
         match component {
@@ -194,7 +197,7 @@ async fn serve_file(
             metadata
         }
         Err(e) => {
-            eprintln!("File metadata error for {:?}: {}", full_path, e);
+            eprintln!("File metadata error: {}", e);
             return (StatusCode::NOT_FOUND, "File not found").into_response();
         }
     };
@@ -317,11 +320,10 @@ async fn upload_file(
             };
             target_dir = resolved_path;
         } else if name == "file" {
-            filename = sanitize_upload_filename(field.file_name().unwrap_or_default()).unwrap_or_default();
-            
-            if filename.is_empty() {
-                filename = format!("upload_{}.bin", uuid::Uuid::new_v4());
-            }
+            filename = match sanitize_upload_filename(field.file_name().unwrap_or_default()) {
+                Some(name) => name,
+                None => format!("upload_{}.bin", uuid::Uuid::new_v4()),
+            };
 
             // Safety: Path Traversal Check before creating the file
             if !target_dir.starts_with(&state.root) {
@@ -335,7 +337,7 @@ async fn upload_file(
             let mut file = match File::create(&dest_path).await {
                 Ok(file) => file,
                 Err(e) => {
-                    eprintln!("Failed to create upload destination {:?}: {}", dest_path, e);
+                    eprintln!("Failed to create upload destination: {}", e);
                     return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create file").into_response();
                 }
             };
@@ -393,8 +395,7 @@ async fn list_files(
     }
 
     let rel_path = params.get("path").cloned().unwrap_or_default();
-    let rel_path = rel_path.trim_start_matches('/');
-    let Some(full_path) = resolve_path_within_root(&state.root, rel_path) else {
+    let Some(full_path) = resolve_path_within_root(&state.root, &rel_path) else {
         return (StatusCode::FORBIDDEN, "Access denied").into_response();
     };
 
