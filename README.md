@@ -1,112 +1,85 @@
-## Vela
+# Vela
 
-> Convert any storage device into your own local cloud
+> Convert any storage device into your own personal local cloud with ease.
 
----
-
-### Overview
-
-Vela is a Rust CLI tool that lets you scan, mount, and serve any external storage device over your local network. Turn your USBs, SSDs, or other storage devices into a personal local cloud quickly.
+Vela is a Rust-based CLI tool designed to scan, mount, and serve external storage devices over your local network via a modern web interface.
 
 ---
 
-### Setup
+### ⚠️ CRITICAL SECURITY CHECKLIST
+> **Read before running any commands:**
+- 🛡️ **PRIVILEGE SAFETY:** Always run `tvela mount` with `sudo`, but run `tvela serve` as a **regular user** to prevent system-wide compromise.
+- 🔒 **HARDWARE PROTECTION:** Use Read-Only mode (`-m r`) by default; it locks the physical drive at the OS kernel level.
+- 📡 **DATA ENCRYPTION:** Plain HTTP is vulnerable to sniffing; always use **ngrok** for HTTPS when accessing your cloud remotely.
+- 🔑 **SESSION SECURITY:** Vela uses `HttpOnly` cookies; your access tokens are never exposed to malicious browser scripts (XSS).
 
-Clone the repository:
+---
+
+### Features
+
+- 📂 **Device Management**: Scan for block devices and partitions.
+- 🚀 **One-Command Cloud**: Mount and serve your files in seconds.
+- 🛡️ **Defense in Depth**: OS-level kernel locks and application-level path traversal protection.
+- 🔐 **Secure Authentication**: Automatic UUID v4 token generation and `HttpOnly` cookie sessions.
+- 📤 **File Uploads**: Modern UI for uploading files to your cloud (when in write mode).
+- 🎥 **Media Streaming**: Support for video seeking (Range requests) and in-browser previews.
+
+---
+
+### Installation
 
 ```bash
-git clone https://github.com/<your-username>/vela.git
+git clone https://github.com/shivu/vela.git
 cd vela
-```
-
-Build and install locally (as `tvela`):
-
-```bash
 make install
 ```
 
-This installs the binary as `tvela` in `~/.local/bin/`. Ensure this directory is in your `PATH`.
-
 ---
 
-### CLI Commands
+### CLI Usage
 
-All commands can be run using the `tvela` binary after installation.
-
-#### 1. Scan
-
-List all storage devices connected to your system in a tree-like structure:
-
+#### 1. Scan Devices
 ```bash
 tvela scan
 ```
 
-Output example:
+#### 2. Mount a Device
+```bash
+# Mount as Read-Only (Secure Default)
+sudo tvela mount /dev/sdb1 mydrive -m r
 
+# Mount as Read-Write
+sudo tvela mount /dev/sdb1 mydrive -m w
 ```
-NAME               LABEL      SIZE       TYPE  MNT NAME     MOUNT           REM   PERM
------------------- ---------- ---------- ----- ------------ --------------- ----- --------
-/dev/sda           -          7.46GiB    disk  -            -               Yes   RW
-└─sda1             FIREFLY    7.46GiB    part  temp         /mnt/temp       -     RW
+
+#### 3. Serve the Cloud
+```bash
+# Start the server (DO NOT run as sudo)
+tvela serve mydrive -m r
 ```
+**Options:**
+- `-m, --mode <MODE>`: `r` (Read-Only) or `w` (Read-Write/Uploads).
+- `--no-auth`: Disable authentication (only for trusted local tests).
 
 ---
 
-#### 2. Mount
+### Accessing your Cloud
 
-Mount a device at `/mnt/<mount_name>` (creates the folder if missing):
+#### Local & LAN Access
+- **Local**: `http://localhost:9000`
+- **LAN**: `http://<your-ip>:9000`
 
+#### Remote Access via ngrok (Recommended)
+To expose your local cloud to the internet securely with HTTPS encryption:
 ```bash
-tvela mount <device> <mount_name>
+# Replace <your-ip> with your local LAN IP (e.g., 192.168.1.5)
+ngrok http <your-ip>:9000
 ```
-
-* `device`: Path to the storage device (e.g., `/dev/sda1`)
-* `mount_name`: Folder name under `/mnt/`.
-
-Example:
-
-```bash
-tvela mount /dev/sda1 ext
-```
-
-Mounted at `/mnt/ext`.
+*Vela's cookie-based authentication is fully compatible with ngrok's secure TLS-terminated tunnels.*
 
 ---
 
-#### 3. Unmount
-
-Unmount a previously mounted device:
-
-```bash
-tvela unmount <mountpoint>
-```
-
-Example:
-
-```bash
-tvela unmount /mnt/ext
-```
-
----
-
-#### 4. Serve
-
-Start an HTTP server serving a specific mount from `/mnt/` on the local network:
-
-```bash
-tvela serve <mount_name>
-```
-
-Example:
-
-```bash
-tvela serve ext
-```
-
-This will serve files from `/mnt/ext`.
-
-Default server URL:
-
-```
-http://localhost:9000
-```
+### Tech Stack
+- **Backend**: Rust (Axum, Tokio, Tower-Cookies)
+- **Frontend**: Vanilla JS / CSS (SPA with Blob-streaming support)
+- **System**: Linux `mount` with UID/GID mapping and `lsblk`

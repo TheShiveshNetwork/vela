@@ -1,16 +1,17 @@
 use axum::{
-    routing::get,
+    routing::{get, post},
     Router,
-    extract::{Query, Path as AxumPath},
+    extract::{Query, State, Path as AxumPath, Multipart},
     response::{Json, IntoResponse, Response},
     http::{StatusCode, header, HeaderMap, HeaderValue},
     body::Body,
 };
+use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
 use serde::Serialize;
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::{PathBuf, Path, Component}, sync::Arc};
 use anyhow::Result;
 use tokio::fs::File;
-use tokio::io::{AsyncSeekExt, AsyncReadExt};
+use tokio::io::{AsyncSeekExt, AsyncReadExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
 #[derive(Serialize)]
@@ -21,18 +22,45 @@ struct FileEntry {
     size: u64,
 }
 
-pub async fn start(root: String) -> Result<()> {
-    println!("Serving: {}", root);
+#[derive(Clone)]
+struct ServerState {
+    root: String,
+    read_only: bool,
+    token: Option<String>,
+}
+
+pub async fn start(root: String, read_only: bool, no_auth: bool) -> Result<()> {
+    let token = if no_auth {
+        None
+    } else {
+        Some(uuid::Uuid::new_v4().to_string())
+    };
+
+    println!("Serving ({}): {}", if read_only { "RO" } else { "RW" }, root);
+    if let Some(ref t) = token {
+        println!("🔐 Authentication enabled!");
+        println!("🔑 ACCESS TOKEN: {}", t);
+        println!("   The web UI will handle this via secure HttpOnly cookies.");
+    } else {
+        println!("⚠️ Authentication DISABLED!");
+    }
     
-    let root_clone = root.clone();
-    let root_clone2 = root.clone();
+    let state = Arc::new(ServerState {
+        root: root.clone(),
+        read_only,
+        token,
+    });
 
     let app = Router::new()
         .route("/", get(serve_index))
-        .route("/api/list", get(move |q| list_files(q, root_clone.clone())))
-        .route("/files/{*path}", get(move |path, headers| serve_file(path, headers, root_clone2.clone())))
+        .route("/api/list", get(list_files))
+        .route("/api/upload", post(upload_file))
+        .route("/api/auth", post(authenticate))
+        .route("/files/{*path}", get(serve_file))
         .route("/app.js", get(serve_js))
-        .route("/static/{*path}", get(serve_static));
+        .route("/static/{*path}", get(serve_static))
+        .layer(CookieManagerLayer::new())
+        .with_state(state);
     
     let addr = SocketAddr::from(([0, 0, 0, 0], 9000));
     print_access_urls();
@@ -41,6 +69,38 @@ pub async fn start(root: String) -> Result<()> {
     axum::serve(listener, app).await?;
     
     Ok(())
+}
+
+fn check_auth(state: &ServerState, cookies: &Cookies) -> bool {
+    if state.token.is_none() {
+        return true;
+    }
+    
+    if let Some(cookie) = cookies.get("vela_token") {
+        if let Some(ref t) = state.token {
+            return cookie.value() == t;
+        }
+    }
+    false
+}
+
+async fn authenticate(
+    State(state): State<Arc<ServerState>>,
+    cookies: Cookies,
+    body: String,
+) -> Response {
+    if let Some(ref t) = state.token {
+        if body.trim() == t {
+            let mut cookie = Cookie::new("vela_token", t.clone());
+            cookie.set_path("/");
+            cookie.set_http_only(true);
+            cookie.set_same_site(tower_cookies::cookie::SameSite::Lax);
+            cookie.set_max_age(time::Duration::days(7));
+            cookies.add(cookie);
+            return (StatusCode::OK, "Authenticated").into_response();
+        }
+    }
+    StatusCode::UNAUTHORIZED.into_response()
 }
 
 async fn serve_index() -> Response {
@@ -91,20 +151,44 @@ async fn serve_static(AxumPath(path): AxumPath<String>) -> Response {
     }
 }
 
+fn resolve_path_within_root(root: &str, raw: &str) -> Option<PathBuf> {
+    if raw.contains('\\') {
+        return None;
+    }
+    let mut rel = PathBuf::new();
+    for component in Path::new(raw.trim_start_matches('/')).components() {
+        match component {
+            Component::Normal(part) => rel.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(PathBuf::from(root).join(rel))
+}
+
+fn sanitize_upload_filename(filename: &str) -> Option<String> {
+    let name = Path::new(filename).file_name()?.to_str()?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
 async fn serve_file(
+    State(state): State<Arc<ServerState>>,
+    cookies: Cookies,
     AxumPath(path): AxumPath<String>, 
     headers: HeaderMap,
-    root: String
 ) -> Response {
-    // Clean the path
-    let clean_path = path.trim_start_matches('/');
-    let full_path = PathBuf::from(&root).join(clean_path);
-    
-    println!("=== FILE SERVING ===");
-    println!("Requested: {}", path);
-    println!("Full path: {:?}", full_path);
-    
-    // Get file metadata
+    if !check_auth(&state, &cookies) {
+        return (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+    }
+
+    let Some(full_path) = resolve_path_within_root(&state.root, &path) else {
+        return (StatusCode::FORBIDDEN, "Access denied").into_response();
+    };
+
     let metadata = match tokio::fs::metadata(&full_path).await {
         Ok(metadata) => {
             if !metadata.is_file() {
@@ -113,33 +197,22 @@ async fn serve_file(
             metadata
         }
         Err(e) => {
-            println!("ERROR: {}", e);
-            return (StatusCode::NOT_FOUND, format!("File not found: {}", e)).into_response();
+            eprintln!("File metadata error: {}", e);
+            return (StatusCode::NOT_FOUND, "File not found").into_response();
         }
     };
     
     let file_size = metadata.len();
-    println!("File size: {} bytes", file_size);
-    
-    // Determine content type
     let content_type = get_content_type(&full_path);
-    println!("Content-Type: {}", content_type);
-    
-    // Check for Range header (for video streaming)
     let range_header = headers.get(header::RANGE);
     
     if let Some(range) = range_header {
-        println!("Range request: {:?}", range);
         return serve_range(full_path, range, file_size, content_type).await;
     }
     
-    // Serve entire file
     let file = match File::open(&full_path).await {
         Ok(file) => file,
-        Err(e) => {
-            println!("ERROR opening file: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open file").into_response();
-        }
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open file").into_response(),
     };
     
     let stream = ReaderStream::new(file);
@@ -150,8 +223,6 @@ async fn serve_file(
     response_headers.insert(header::CONTENT_LENGTH, file_size.to_string().parse().unwrap());
     response_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
     response_headers.insert(header::CACHE_CONTROL, "public, max-age=3600".parse().unwrap());
-    
-    println!("Serving full file\n");
     
     (StatusCode::OK, response_headers, body).into_response()
 }
@@ -167,7 +238,6 @@ async fn serve_range(
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid range header").into_response(),
     };
     
-    // Parse range header (format: "bytes=start-end")
     let range_str = range_str.trim_start_matches("bytes=");
     let parts: Vec<&str> = range_str.split('-').collect();
     
@@ -182,23 +252,15 @@ async fn serve_range(
         parts[1].parse().unwrap_or(file_size - 1).min(file_size - 1)
     };
     
-    println!("Range: {}-{} of {}", start, end, file_size);
-    
     let mut file = match File::open(&full_path).await {
         Ok(file) => file,
-        Err(e) => {
-            println!("ERROR opening file: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open file").into_response();
-        }
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to open file").into_response(),
     };
     
-    // Seek to start position
-    if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
-        println!("ERROR seeking: {}", e);
+    if let Err(_) = file.seek(std::io::SeekFrom::Start(start)).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to seek").into_response();
     }
     
-    // Read the range
     let length = (end - start + 1) as usize;
     let mut buffer = vec![0u8; length];
     
@@ -212,157 +274,160 @@ async fn serve_range(
                 format!("bytes {}-{}/{}", start, end, file_size).parse().unwrap(),
             );
             response_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-            
-            println!("Serving range successfully\n");
-            
             (StatusCode::PARTIAL_CONTENT, response_headers, buffer).into_response()
         }
-        Err(e) => {
-            println!("ERROR reading file: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response()
-        }
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response()
     }
 }
 
-fn get_content_type(path: &PathBuf) -> String {
-    // Get extension and convert to lowercase for case-insensitive matching
-    let ext = path.extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_lowercase());
+async fn upload_file(
+    State(state): State<Arc<ServerState>>,
+    cookies: Cookies,
+    mut multipart: Multipart,
+) -> Response {
+    if !check_auth(&state, &cookies) {
+        return (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+    }
+
+    if state.read_only {
+        return (StatusCode::FORBIDDEN, "Server is in read-only mode").into_response();
+    }
+
+    let mut target_dir = PathBuf::from(&state.root);
+    let mut filename = String::new();
+
+    println!("=== UPLOAD REQUEST (STREAMING) ===");
     
+    // We first need to find the filename and target path from the multipart fields
+    // However, multipart fields are sequential. To be safe and efficient, we 
+    // stream the file field last or handle it when it appears.
+    
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("Failed to read multipart field: {}", e);
+                return (StatusCode::BAD_REQUEST, "Invalid multipart form data").into_response();
+            }
+        };
+        let name = field.name().unwrap_or_default().to_string();
+        
+        if name == "path" {
+            let path_val = field.text().await.unwrap_or_default();
+            let Some(resolved_path) = resolve_path_within_root(&state.root, &path_val) else {
+                return (StatusCode::FORBIDDEN, "Invalid path").into_response();
+            };
+            target_dir = resolved_path;
+        } else if name == "file" {
+            filename = match sanitize_upload_filename(field.file_name().unwrap_or_default()) {
+                Some(name) => name,
+                None => format!("upload_{}.bin", uuid::Uuid::new_v4()),
+            };
+
+            // Safety: Path Traversal Check before creating the file
+            if !target_dir.starts_with(&state.root) {
+                println!("ERROR: Invalid path traversal blocked during stream.");
+                return (StatusCode::FORBIDDEN, "Invalid path").into_response();
+            }
+
+            let dest_path = target_dir.join(&filename);
+            println!("Streaming data to: {:?}", dest_path);
+
+            let mut file = match File::create(&dest_path).await {
+                Ok(file) => file,
+                Err(e) => {
+                    eprintln!("Failed to create upload destination: {}", e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create file").into_response();
+                }
+            };
+
+            let mut total_bytes = 0;
+            loop {
+                match field.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if let Err(e) = file.write_all(&chunk).await {
+                            eprintln!("ERROR writing upload chunk: {}", e);
+                            return (StatusCode::INTERNAL_SERVER_ERROR, "Write error during streaming").into_response();
+                        }
+                        total_bytes += chunk.len();
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("ERROR reading upload chunk: {}", e);
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read upload stream").into_response();
+                    }
+                }
+            }
+            
+            println!("Stream complete. Received {} bytes.", total_bytes);
+        }
+    }
+
+    if filename.is_empty() {
+        return (StatusCode::BAD_REQUEST, "No file provided").into_response();
+    }
+
+    StatusCode::OK.into_response()
+}
+
+fn get_content_type(path: &PathBuf) -> String {
+    let ext = path.extension().and_then(|s| s.to_str()).map(|s| s.to_lowercase());
     match ext.as_deref() {
-        // Images
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("png") => "image/png",
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
-        Some("bmp") => "image/bmp",
-        Some("svg") => "image/svg+xml",
-        Some("heic") | Some("heif") => "image/heic",
-        Some("ico") => "image/x-icon",
-        Some("tiff") | Some("tif") => "image/tiff",
-        Some("avif") => "image/avif",
-        
-        // Videos
+        Some("pdf") => "application/pdf",
         Some("mp4") => "video/mp4",
         Some("webm") => "video/webm",
-        Some("mov") => "video/quicktime",
-        Some("avi") => "video/x-msvideo",
-        Some("mkv") => "video/x-matroska",
-        Some("flv") => "video/x-flv",
-        Some("wmv") => "video/x-ms-wmv",
-        Some("m4v") => "video/x-m4v",
-        Some("mpg") | Some("mpeg") => "video/mpeg",
-        Some("3gp") => "video/3gpp",
-        Some("ogv") => "video/ogg",
-        
-        // Audio
-        Some("mp3") => "audio/mpeg",
-        Some("wav") => "audio/wav",
-        Some("ogg") | Some("oga") => "audio/ogg",
-        Some("m4a") => "audio/mp4",
-        Some("flac") => "audio/flac",
-        Some("aac") => "audio/aac",
-        Some("wma") => "audio/x-ms-wma",
-        Some("opus") => "audio/opus",
-        
-        // Documents
-        Some("pdf") => "application/pdf",
-        Some("txt") => "text/plain; charset=utf-8",
-        Some("json") => "application/json",
-        Some("xml") => "application/xml",
-        Some("csv") => "text/csv",
-        Some("doc") => "application/msword",
-        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        Some("xls") => "application/vnd.ms-excel",
-        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        Some("ppt") => "application/vnd.ms-powerpoint",
-        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        
-        // Archives
-        Some("zip") => "application/zip",
-        Some("rar") => "application/x-rar-compressed",
-        Some("7z") => "application/x-7z-compressed",
-        Some("tar") => "application/x-tar",
-        Some("gz") => "application/gzip",
-        Some("bz2") => "application/x-bzip2",
-        
-        // All other files - downloadable
         _ => "application/octet-stream",
     }.to_string()
 }
 
 async fn list_files(
+    State(state): State<Arc<ServerState>>,
+    cookies: Cookies,
     Query(params): Query<std::collections::HashMap<String, String>>,
-    root: String,
-) -> Json<Vec<FileEntry>> {
+) -> Response {
+    if !check_auth(&state, &cookies) {
+        return (StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+    }
+
     let rel_path = params.get("path").cloned().unwrap_or_default();
-    let rel_path = rel_path.trim_start_matches('/');
-    let full_path = PathBuf::from(&root).join(rel_path);
-    
+    let Some(full_path) = resolve_path_within_root(&state.root, &rel_path) else {
+        return (StatusCode::FORBIDDEN, "Access denied").into_response();
+    };
+
     let mut entries = Vec::new();
-    
-    // Use tokio's async read_dir
     if let Ok(mut read_dir) = tokio::fs::read_dir(&full_path).await {
         while let Ok(Some(entry)) = read_dir.next_entry().await {
-            let entry_full_path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            
-            // Use symlink_metadata to get accurate file type without following symlinks
-            // Then use regular metadata to get actual file size (in case of symlinks)
-            if let Ok(symlink_meta) = tokio::fs::symlink_metadata(&entry_full_path).await {
-                let is_dir = symlink_meta.is_dir();
-                let is_symlink = symlink_meta.is_symlink();
-                
-                // For symlinks, resolve to get actual size and type
-                let (actual_size, actual_is_dir) = if is_symlink {
-                    if let Ok(real_meta) = tokio::fs::metadata(&entry_full_path).await {
-                        (real_meta.len(), real_meta.is_dir())
-                    } else {
-                        (0, is_dir)
-                    }
-                } else {
-                    (symlink_meta.len(), is_dir)
-                };
-                
-                // Construct the relative path for this entry
-                let entry_path = if rel_path.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{}/{}", rel_path, name)
-                };
-                
-                // Store 0 size for directories, actual size for files
-                let display_size = if actual_is_dir { 0 } else { actual_size };
-                
+            if let Ok(meta) = entry.metadata().await {
+                let entry_path = if rel_path.is_empty() { name.clone() } else { format!("{}/{}", rel_path, name) };
                 entries.push(FileEntry {
                     name,
-                    is_dir: actual_is_dir,
+                    is_dir: meta.is_dir(),
                     path: entry_path,
-                    size: display_size,
+                    size: if meta.is_dir() { 0 } else { meta.len() },
                 });
             }
         }
     }
     
-    // Sort: directories first, then alphabetically
-    entries.sort_by(|a, b| {
-        match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        }
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
     
-    Json(entries)
+    Json(entries).into_response()
 }
 
 fn print_access_urls() {
     use std::process::Command;
-    
     println!("\n📡 Vela is running!");
     println!("Local:  http://localhost:9000");
-    
     if let Ok(output) = Command::new("ip").arg("route").output() {
         let text = String::from_utf8_lossy(&output.stdout);
         for line in text.lines() {
@@ -373,6 +438,5 @@ fn print_access_urls() {
             }
         }
     }
-    
     println!();
 }
